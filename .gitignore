@@ -1,0 +1,42 @@
+# Virtual Environment
+trading_env/
+venv/
+env/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# API Keys & Secrets
+.env
+secrets.json
+config.json
+*_secret*
+*_key*
+
+# Trading Data
+*.csv
+*.db
+*.sqlite
+data/
+logs/
+backtest_results/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
