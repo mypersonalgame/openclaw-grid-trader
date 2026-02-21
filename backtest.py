@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""
+網格交易回測引擎
+Backtesting engine for grid trading strategy
+"""
+import ccxt
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from grid_strategy import GridTrader
+
+class GridBacktester:
+    """網格交易回測器"""
+    
+    def __init__(self, trader, days=30, interval='1h'):
+        """
+        初始化回測器
+        
+        Args:
+            trader: GridTrader 實例
+            days: 回測天數
+            interval: K線間隔 ('1m', '5m', '1h', '1d')
+        """
+        self.trader = trader
+        self.days = days
+        self.interval = interval
+        self.historical_data = None
+        
+    def fetch_historical_data(self):
+        """獲取歷史數據"""
+        print(f"📥 正在獲取 {self.days} 天的歷史數據...")
+        
+        # 計算需要的數據點數量
+        if self.interval == '1h':
+            limit = self.days * 24
+        elif self.interval == '1d':
+            limit = self.days
+        elif self.interval == '5m':
+            limit = min(1000, self.days * 288)  # API 限制
+        else:
+            limit = min(1000, self.days * 1440)  # 1m
+        
+        # 獲取 OHLCV 數據
+        ohlcv = self.trader.exchange.fetch_ohlcv(
+            self.trader.symbol, 
+            self.interval, 
+            limit=limit
+        )
+        
+        # 轉換為 DataFrame
+        df = pd.DataFrame(
+            ohlcv, 
+            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        )
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
+        self.historical_data = df
+        
+        print(f"✅ 獲取 {len(df)} 個數據點")
+        print(f"   時間範圍: {df['timestamp'].min()} 至 {df['timestamp'].max()}")
+        print(f"   價格範圍: ${df['close'].min():,.2f} - ${df['close'].max():,.2f}")
+        
+        return df
+    
+    def run_backtest(self):
+        """執行回測"""
+        if self.historical_data is None:
+            self.fetch_historical_data()
+        
+        df = self.historical_data
+        
+        print("\n" + "=" * 60)
+        print("🔄 開始回測...")
+        print("=" * 60)
+        
+        # 使用第一個價格初始化
+        first_price = df.iloc[0]['close']
+        self.trader.current_price = first_price
+        self.trader.base_price = first_price
+        
+        # 重新計算網格（基於歷史數據範圍）
+        price_min = df['close'].min()
+        price_max = df['close'].max()
+        price_range = price_max - price_min
+        
+        # 網格覆蓋實際價格範圍的 90%
+        lower_bound = price_min - price_range * 0.05
+        upper_bound = price_max + price_range * 0.05
+        
+        self.trader.grids = np.linspace(lower_bound, upper_bound, self.trader.grid_count + 1)
+        
+        print(f"網格範圍調整: ${lower_bound:,.2f} - ${upper_bound:,.2f}")
+        
+        # 模擬交易
+        trade_log = []
+        
+        for idx, row in df.iterrows():
+            current_price = row['close']
+            
+            # 檢查網格信號
+            signals = self.trader.check_grid_signals(current_price)
+            
+            # 執行交易
+            for action, price, grid_index in signals:
+                self.trader.execute_trade(action, price, grid_index)
+                trade_log.append({
+                    'timestamp': row['timestamp'],
+                    'action': action,
+                    'price': price,
+                    'grid_index': grid_index
+                })
+            
+            # 更新當前價格
+            self.trader.current_price = current_price
+        
+        print(f"\n✅ 回測完成！共執行 {len(trade_log)} 筆交易")
+        
+        return trade_log
+    
+    def generate_report(self):
+        """生成回測報告"""
+        status = self.trader.get_status()
+        df = self.historical_data
+        
+        # 計算額外指標
+        total_days = (df['timestamp'].max() - df['timestamp'].min()).days
+        if total_days == 0:
+            total_days = 1
+        
+        monthly_return = (status['total_return_pct'] / total_days) * 30
+        
+        # 計算最大回撤
+        equity_curve = []
+        running_equity = self.trader.investment
+        
+        for trade in self.trader.filled_orders:
+            running_equity += trade['profit']
+            equity_curve.append(running_equity)
+        
+        if equity_curve:
+            peak = self.trader.investment
+            max_drawdown = 0
+            for equity in equity_curve:
+                if equity > peak:
+                    peak = equity
+                drawdown = ((peak - equity) / peak) * 100
+                max_drawdown = max(max_drawdown, drawdown)
+        else:
+            max_drawdown = 0
+        
+        # 打印報告
+        print("\n" + "=" * 60)
+        print("📊 回測報告")
+        print("=" * 60)
+        
+        print(f"\n⏱️  回測期間:")
+        print(f"   開始: {df['timestamp'].min()}")
+        print(f"   結束: {df['timestamp'].max()}")
+        print(f"   天數: {total_days} 天")
+        
+        print(f"\n💰 資金狀況:")
+        print(f"   初始資金: ${self.trader.investment:,.2f}")
+        print(f"   最終資金: ${status['total_value']:,.2f}")
+        print(f"   總盈虧: ${status['total_pnl']:,.2f}")
+        print(f"   總回報率: {status['total_return_pct']:+.2f}%")
+        print(f"   月化回報: {monthly_return:+.2f}%")
+        
+        print(f"\n📈 交易統計:")
+        print(f"   總交易次數: {status['total_trades']}")
+        print(f"   勝率: {status['win_rate']:.1f}%")
+        print(f"   平均單筆利潤: ${status['realized_profit'] / max(1, len(self.trader.filled_orders)):.2f}")
+        print(f"   最大回撤: {max_drawdown:.2f}%")
+        
+        print(f"\n🎯 價格波動:")
+        print(f"   起始價格: ${df['close'].iloc[0]:,.2f}")
+        print(f"   結束價格: ${df['close'].iloc[-1]:,.2f}")
+        print(f"   最低價格: ${df['close'].min():,.2f}")
+        print(f"   最高價格: ${df['close'].max():,.2f}")
+        print(f"   波動率: {df['close'].std() / df['close'].mean() * 100:.2f}%")
+        
+        print("\n" + "=" * 60)
+        
+        # 判斷結果
+        if monthly_return >= 3:
+            print("✅ 策略表現良好！月化回報達標")
+        elif monthly_return >= 1:
+            print("⚠️  策略表現一般，建議優化參數")
+        else:
+            print("❌ 策略表現不佳，需要重新設計")
+        
+        print("=" * 60)
+        
+        return {
+            'total_return_pct': status['total_return_pct'],
+            'monthly_return': monthly_return,
+            'win_rate': status['win_rate'],
+            'max_drawdown': max_drawdown,
+            'total_trades': status['total_trades']
+        }
+
+if __name__ == "__main__":
+    # 示例：回測 30 天
+    print("🚀 網格交易策略回測")
+    print("=" * 60)
+    
+    # 創建交易者
+    trader = GridTrader(
+        symbol='BTC/USDT',
+        investment=1000,
+        grid_count=20,  # 增加網格數量提高交易頻率
+        price_range_pct=0.1,
+        paper_trading=True
+    )
+    
+    # 創建回測器
+    backtester = GridBacktester(trader, days=30, interval='1h')
+    
+    # 執行回測
+    backtester.run_backtest()
+    
+    # 生成報告
+    report = backtester.generate_report()
+    
+    # 保存狀態
+    trader.save_state('backtest_result.json')
